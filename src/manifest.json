@@ -1,0 +1,55 @@
+{
+  "manifest_version": 3,
+  "name": "沉浸式翻译",
+  "version": "1.0.0",
+  "description": "调用 DeepSeek API 将网页中的英语/日语自动翻译为简体中文",
+  "permissions": [
+    "storage",
+    "contextMenus"
+  ],
+  "host_permissions": [
+    "<all_urls>",
+    "https://api.deepseek.com/*"
+  ],
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"],
+      "run_at": "document_idle"
+    }
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_popup": "popup/index.html",
+    "default_title": "沉浸式翻译"
+  },
+  "commands": {
+    "toggle-translation": {
+      "suggested_key": {
+        "default": "Alt+T"
+      },
+      "description": "启用/禁用页面翻译"
+    },
+    "toggle-hover": {
+      "suggested_key": {
+        "default": "Alt+H"
+      },
+      "description": "启用/禁用悬停翻译"
+    },
+    "translate-selection": {
+      "suggested_key": {
+        "default": "Alt+S"
+      },
+      "description": "翻译选中文本"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["assets/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

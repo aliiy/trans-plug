@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>沉浸式翻译</title>
+  <link rel="stylesheet" href="./popup.css" />
+</head>
+<body>
+  <div class="popup-container">
+    <!-- Header -->
+    <header class="popup-header">
+      <h1>🌐 沉浸式翻译</h1>
+      <span class="version">v1.0.0</span>
+    </header>
+
+    <!-- API Key -->
+    <section class="popup-section">
+      <label class="section-label" for="api-key">DeepSeek API Key</label>
+      <div class="input-row">
+        <input
+          type="password"
+          id="api-key"
+          placeholder="输入你的 DeepSeek API Key..."
+          autocomplete="off"
+        />
+        <button id="toggle-key-visibility" title="显示/隐藏" type="button">👁</button>
+      </div>
+      <a href="https://platform.deepseek.com/api_keys" target="_blank" class="hint-link">
+        获取 API Key →
+      </a>
+    </section>
+
+    <!-- Global Controls -->
+    <section class="popup-section">
+      <div class="toggle-row">
+        <span class="toggle-label">📄 页面翻译</span>
+        <label class="switch">
+          <input type="checkbox" id="toggle-enabled" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="toggle-row">
+        <span class="toggle-label">🖱 悬停翻译 (按住Alt)</span>
+        <label class="switch">
+          <input type="checkbox" id="toggle-hover" />
+          <span class="slider"></span>
+        </label>
+      </div>
+    </section>
+
+    <!-- Domain Rules -->
+    <section class="popup-section">
+      <label class="section-label">当前网站规则</label>
+      <p class="current-domain" id="current-domain">—</p>
+      <div class="domain-buttons">
+        <button class="domain-btn active" data-action="default" id="btn-default">🔄 默认</button>
+        <button class="domain-btn" data-action="always" id="btn-always">✅ 始终翻译</button>
+        <button class="domain-btn" data-action="never" id="btn-never">🚫 永不翻译</button>
+      </div>
+    </section>
+
+    <!-- Utilities -->
+    <section class="popup-section popup-footer">
+      <button id="clear-cache" class="util-btn">🗑 清除翻译缓存</button>
+      <div id="status-message" class="status-message"></div>
+    </section>
+  </div>
+
+  <script type="module" src="./index.ts"></script>
+</body>
+</html>
