@@ -1,5 +1,5 @@
 /**
- * Popup UI logic — manages settings, domain rules, and cache.
+ * Popup UI logic — manages settings, domain rules, cache, and segmented control animation.
  */
 
 import { getSettings, setSetting } from '../utils/storage';
@@ -12,6 +12,8 @@ const toggleEnabled = document.getElementById('toggle-enabled') as HTMLInputElem
 const toggleHover = document.getElementById('toggle-hover') as HTMLInputElement;
 const toggleKeyVis = document.getElementById('toggle-key-visibility') as HTMLButtonElement;
 const currentDomainEl = document.getElementById('current-domain') as HTMLElement;
+const segmentedControl = document.getElementById('segmented-control') as HTMLElement;
+const segmentedPill = document.getElementById('segmented-pill') as HTMLElement;
 const btnDefault = document.getElementById('btn-default') as HTMLButtonElement;
 const btnAlways = document.getElementById('btn-always') as HTMLButtonElement;
 const btnNever = document.getElementById('btn-never') as HTMLButtonElement;
@@ -19,6 +21,11 @@ const clearCacheBtn = document.getElementById('clear-cache') as HTMLButtonElemen
 const statusMsg = document.getElementById('status-message') as HTMLElement;
 
 let currentHostname = '';
+const segButtons = [btnDefault, btnAlways, btnNever];
+
+// --- Eye icon SVGs (Lucide) ---
+const eyeIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>`;
+const eyeOffIcon = `<svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>`;
 
 // --- Init ---
 
@@ -40,7 +47,7 @@ async function init(): Promise<void> {
   toggleEnabled.checked = settings.enabled;
   toggleHover.checked = settings.hoverEnabled;
 
-  // Load domain rule
+  // Load domain rule + position the sliding pill
   const action = await getDomainAction(currentHostname);
   highlightDomainButton(action);
 
@@ -84,7 +91,7 @@ async function onHoverChange(): Promise<void> {
 function onToggleKeyVisibility(): void {
   const isPassword = apiKeyInput.type === 'password';
   apiKeyInput.type = isPassword ? 'text' : 'password';
-  toggleKeyVis.textContent = isPassword ? '🙈' : '👁';
+  toggleKeyVis.innerHTML = isPassword ? eyeOffIcon : eyeIcon;
 }
 
 async function onDomainRuleChange(action: DomainAction | 'default'): Promise<void> {
@@ -110,17 +117,24 @@ async function onClearCache(): Promise<void> {
 // --- Helpers ---
 
 function highlightDomainButton(action: string): void {
-  [btnDefault, btnAlways, btnNever].forEach((btn) => btn.classList.remove('active'));
+  segButtons.forEach((btn) => btn.classList.remove('active'));
+
+  let targetBtn: HTMLButtonElement;
   switch (action) {
-    case 'always':
-      btnAlways.classList.add('active');
-      break;
-    case 'never':
-      btnNever.classList.add('active');
-      break;
-    default:
-      btnDefault.classList.add('active');
+    case 'always': targetBtn = btnAlways; break;
+    case 'never':  targetBtn = btnNever; break;
+    default:       targetBtn = btnDefault; break;
   }
+  targetBtn.classList.add('active');
+
+  // Animate the sliding pill to the active button
+  const containerRect = segmentedControl.getBoundingClientRect();
+  const btnRect = targetBtn.getBoundingClientRect();
+  const left = btnRect.left - containerRect.left;
+  const width = btnRect.width;
+
+  segmentedPill.style.left = `${left}px`;
+  segmentedPill.style.width = `${width}px`;
 }
 
 async function notifyContentScript(action: string): Promise<void> {
@@ -134,14 +148,14 @@ async function notifyContentScript(action: string): Promise<void> {
 
 function showStatus(message: string, type: string): void {
   statusMsg.textContent = message;
-  statusMsg.className = 'status-message';
+  statusMsg.className = 'status-toast';
   if (type) statusMsg.classList.add(type);
 
   // Auto-clear after 2.5s
   setTimeout(() => {
     if (statusMsg.textContent === message) {
       statusMsg.textContent = '';
-      statusMsg.className = 'status-message';
+      statusMsg.className = 'status-toast';
     }
   }, 2500);
 }

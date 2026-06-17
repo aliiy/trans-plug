@@ -4,67 +4,103 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>沉浸式翻译</title>
-  <link rel="stylesheet" href="./popup.css" />
+  <link rel="stylesheet" href="./main.css" />
 </head>
-<body>
-  <div class="popup-container">
-    <!-- Header -->
-    <header class="popup-header">
-      <h1>🌐 沉浸式翻译</h1>
-      <span class="version">v1.0.0</span>
-    </header>
+<body class="select-none">
 
-    <!-- API Key -->
-    <section class="popup-section">
-      <label class="section-label" for="api-key">DeepSeek API Key</label>
-      <div class="input-row">
-        <input
-          type="password"
-          id="api-key"
-          placeholder="输入你的 DeepSeek API Key..."
-          autocomplete="off"
-        />
-        <button id="toggle-key-visibility" title="显示/隐藏" type="button">👁</button>
-      </div>
-      <a href="https://platform.deepseek.com/api_keys" target="_blank" class="hint-link">
-        获取 API Key →
-      </a>
-    </section>
+  <!-- ===== Glass panel with glow orbs INSIDE ===== -->
+  <div class="panel">
 
-    <!-- Global Controls -->
-    <section class="popup-section">
-      <div class="toggle-row">
-        <span class="toggle-label">📄 页面翻译</span>
-        <label class="switch">
-          <input type="checkbox" id="toggle-enabled" />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="toggle-row">
-        <span class="toggle-label">🖱 悬停翻译 (按住Alt)</span>
-        <label class="switch">
-          <input type="checkbox" id="toggle-hover" />
-          <span class="slider"></span>
-        </label>
-      </div>
-    </section>
+    <!-- Glow orbs — physical elements inside the panel, absolute-positioned -->
+    <div class="glow-container" aria-hidden="true">
+      <div class="glow-orb glow-blue"></div>
+      <div class="glow-orb glow-purple"></div>
+    </div>
 
-    <!-- Domain Rules -->
-    <section class="popup-section">
-      <label class="section-label">当前网站规则</label>
-      <p class="current-domain" id="current-domain">—</p>
-      <div class="domain-buttons">
-        <button class="domain-btn active" data-action="default" id="btn-default">🔄 默认</button>
-        <button class="domain-btn" data-action="always" id="btn-always">✅ 始终翻译</button>
-        <button class="domain-btn" data-action="never" id="btn-never">🚫 永不翻译</button>
-      </div>
-    </section>
+    <!-- Content layer (above glow) -->
+    <div class="content-layer">
 
-    <!-- Utilities -->
-    <section class="popup-section popup-footer">
-      <button id="clear-cache" class="util-btn">🗑 清除翻译缓存</button>
-      <div id="status-message" class="status-message"></div>
-    </section>
+      <!-- Header -->
+      <div class="header-row">
+        <div class="flex items-center gap-2.5">
+          <div class="logo-mark">
+            <span class="text-[10px] leading-none text-white font-bold">译</span>
+          </div>
+          <span class="text-[14px] font-medium tracking-wide text-zinc-100">沉浸式翻译</span>
+        </div>
+        <span class="text-[10px] text-zinc-600 font-mono tracking-wider">v1.0.0</span>
+      </div>
+
+      <!-- API Key -->
+      <div class="section-row">
+        <div class="flex items-center justify-between mb-2">
+          <span class="label-text">API Key</span>
+          <a href="https://platform.deepseek.com/api_keys" target="_blank" class="hint-link">
+            获取 Key <span class="ml-0.5">↗</span>
+          </a>
+        </div>
+        <div class="api-input-wrap">
+          <input
+            type="password"
+            id="api-key"
+            class="api-input"
+            placeholder="sk-..."
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <button id="toggle-key-visibility" class="api-input-icon" title="显示" type="button">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <!-- Toggles -->
+      <div class="section-row">
+        <div class="toggle-item">
+          <div class="flex flex-col gap-0.5">
+            <span class="text-[12.5px] text-zinc-200">页面翻译</span>
+            <span class="text-[10px] text-zinc-600">翻译当前页面内容</span>
+          </div>
+          <label class="toggle-track">
+            <input type="checkbox" id="toggle-enabled" />
+            <span class="toggle-knob"></span>
+          </label>
+        </div>
+        <div class="toggle-item">
+          <div class="flex flex-col gap-0.5">
+            <span class="text-[12.5px] text-zinc-200">悬停翻译</span>
+            <span class="text-[10px] text-zinc-600">
+              按住 <kbd class="kbd">Alt</kbd> 悬停文字即可翻译
+            </span>
+          </div>
+          <label class="toggle-track">
+            <input type="checkbox" id="toggle-hover" />
+            <span class="toggle-knob"></span>
+          </label>
+        </div>
+      </div>
+
+      <!-- Domain Rules -->
+      <div class="section-row">
+        <div class="flex items-center justify-between mb-2">
+          <span class="label-text">当前网站</span>
+          <span id="current-domain" class="text-[11px] text-zinc-500 font-mono truncate max-w-[180px] text-right">—</span>
+        </div>
+        <div class="segmented" role="group" id="segmented-control">
+          <div class="segmented-pill" id="segmented-pill"></div>
+          <button class="segmented-btn active" data-action="default" id="btn-default">默认</button>
+          <button class="segmented-btn" data-action="always" id="btn-always">始终翻译</button>
+          <button class="segmented-btn" data-action="never" id="btn-never">永不翻译</button>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="pt-1.5">
+        <button id="clear-cache" class="clear-btn">清除翻译缓存</button>
+        <div id="status-message" class="status-toast"></div>
+      </div>
+
+    </div>
   </div>
 
   <script type="module" src="./index.ts"></script>
