@@ -74,7 +74,7 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 ### API contract
 
 - Endpoint: `https://api.deepseek.com/v1/chat/completions`
-- Model: `deepseek-chat`
+- Model: `deepseek-v4-flash`
 - System prompt: detects source language (English/Japanese), translates to Simplified Chinese, passes through numbers/URLs/code/Chinese unchanged
 - Request: JSON array of strings → Response: JSON array of translations (same order)
 - `stream: false`, `temperature: 0.3`, `max_tokens: 4096`

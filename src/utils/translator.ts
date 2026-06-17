@@ -4,7 +4,7 @@
  */
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
-const MODEL = 'deepseek-chat';
+const MODEL = 'deepseek-v4-flash';
 
 const SYSTEM_PROMPT = `You are a translator. Detect if the input text is English or Japanese.
 Translate it into Simplified Chinese.
