@@ -1,6 +1,11 @@
 /**
  * DeepSeek API translation client.
  * Sends batch text arrays, receives JSON array of translations.
+ *
+ * Reliability features:
+ * - Exponential backoff retry: 3 attempts (1s → 2s → 4s) on 429/5xx errors
+ * - Circuit breaker: after 5 consecutive failures, pauses 30s before retrying
+ * - 4xx client errors are NOT retried (retry won't help)
  */
 
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
@@ -11,16 +16,78 @@ Translate it into Simplified Chinese.
 If the input contains numbers, URLs, code, or is already Chinese, output it unchanged.
 Return a valid JSON array only, matching the input order. No extra text.`;
 
+// --- Retry & Circuit Breaker State ---
+
+const MAX_RETRIES = 3;
+const RETRY_BASE_MS = 1000; // 1s base, doubles each retry
+const CIRCUIT_BREAKER_THRESHOLD = 5; // consecutive failures before opening
+const CIRCUIT_BREAKER_COOLDOWN_MS = 30_000; // 30s cooldown
+
+let consecutiveFailures = 0;
+let circuitOpenUntil = 0;
+
 /**
  * Translate a batch of text strings via DeepSeek API.
  * Returns translations in the same order as the input array.
+ * Falls back to returning originals on persistent failure.
  */
 export async function translateBatch(
   texts: string[],
   apiKey: string
 ): Promise<string[]> {
+  // Circuit breaker check
+  if (circuitOpenUntil > 0) {
+    if (Date.now() < circuitOpenUntil) {
+      console.warn(`[translator] Circuit breaker open — returning originals (cooldown ${Math.ceil((circuitOpenUntil - Date.now()) / 1000)}s remaining)`);
+      return texts;
+    }
+    // Cooldown expired — reset and try again
+    circuitOpenUntil = 0;
+  }
+
   const userMessage = JSON.stringify(texts);
 
+  for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const result = await doRequest(userMessage, apiKey);
+      // Success — reset failure counter
+      consecutiveFailures = 0;
+      circuitOpenUntil = 0;
+      return result;
+    } catch (err) {
+      const status = (err as { status?: number }).status ?? 0;
+      const isRetryable = status === 429 || status >= 500;
+
+      if (attempt < MAX_RETRIES && isRetryable) {
+        const delay = RETRY_BASE_MS * Math.pow(2, attempt);
+        console.warn(`[translator] Retry ${attempt + 1}/${MAX_RETRIES} in ${delay}ms (HTTP ${status})`);
+        await sleep(delay);
+        continue;
+      }
+
+      // Non-retryable error or out of retries
+      consecutiveFailures++;
+      console.error(`[translator] API failed after ${attempt + 1} attempt(s):`, err);
+
+      // Check circuit breaker
+      if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+        circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
+        console.error(`[translator] Circuit breaker OPEN for ${CIRCUIT_BREAKER_COOLDOWN_MS / 1000}s (${consecutiveFailures} consecutive failures)`);
+      }
+
+      // Return originals as fallback
+      return texts;
+    }
+  }
+
+  return texts;
+}
+
+/** Perform a single DeepSeek API request (no retry logic). */
+async function doRequest(
+  userMessage: string,
+  apiKey: string
+): Promise<string[]> {
   const response = await fetch(API_URL, {
     method: 'POST',
     headers: {
@@ -40,9 +107,11 @@ export async function translateBatch(
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => 'unknown error');
-    throw new Error(
+    const err = new Error(
       `DeepSeek API error ${response.status}: ${response.statusText} — ${errorBody}`
-    );
+    ) as Error & { status: number };
+    err.status = response.status;
+    throw err;
   }
 
   const data: {
@@ -50,7 +119,6 @@ export async function translateBatch(
   } = await response.json();
 
   const raw = data.choices?.[0]?.message?.content ?? '';
-  // Try to extract a JSON array from the response
   const parsed = extractJsonArray(raw);
   if (!parsed) {
     throw new Error(`Failed to parse translation response: ${raw}`);
@@ -78,4 +146,9 @@ function extractJsonArray(raw: string): string[] | null {
     }
   }
   return null;
+}
+
+/** Promise-based sleep. */
+function sleep(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }

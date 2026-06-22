@@ -4,13 +4,13 @@
  */
 
 export const STYLES = /* css */ `
-/* === Translation Block (appended inside the original element as a child span) ===
+/* === Translation Block (inserted as a sibling after the original element) ===
  * Inherits font, size, color from the parent so it blends with the original text.
  * Only slightly dimmed via opacity to visually distinguish it from the source. */
 .imm-trans-block {
   display: block;
   opacity: 0.82;
-  margin-top: 0.15em;
+  margin-block: 0.15em 0;
   animation: imm-fade-in 0.25s ease-out;
   max-width: 100%;
   overflow-wrap: break-word;

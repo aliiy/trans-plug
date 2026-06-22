@@ -11,7 +11,6 @@ import {
   shouldTranslate,
   getDirectText,
   createTranslationBlock,
-  smashTruncation,
   removeAllTranslations,
   TRANS_BLOCK_CLASS,
   TRANS_MARKER_CLASS,
@@ -32,9 +31,9 @@ import {
 } from './selection-translator';
 
 // --- Constants ---
-const BATCH_SIZE = 15;
-const DEBOUNCE_MS = 200;
-const ROOT_MARGIN = '300px 0px';
+const BATCH_SIZE = 20;
+const DEBOUNCE_MS = 80;
+const ROOT_MARGIN = '500px 0px';
 
 // --- State ---
 let enabled = false;
@@ -42,6 +41,7 @@ let apiKey = '';
 let hoverEnabled = true;
 let observer: IntersectionObserver | null = null;
 let mutationObserver: MutationObserver | null = null;
+let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 const queue = new Set<Element>();
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let isTranslating = false;
@@ -50,6 +50,7 @@ let domainAction: 'always' | 'never' | 'default' = 'default';
 // --- Initialization ---
 
 async function init(): Promise<void> {
+  console.debug('[沉浸式翻译] 插件初始化开始...');
   injectStyles();
 
   // Check domain rules first
@@ -64,6 +65,7 @@ async function init(): Promise<void> {
   const settings = await getSettings();
   apiKey = settings.apiKey;
   hoverEnabled = settings.hoverEnabled;
+  console.debug(`[沉浸式翻译] 设置加载: enabled=${settings.enabled}, hasApiKey=${!!apiKey}, domainAction=${domainAction}`);
 
   // Determine effective enabled state
   if (domainAction === 'always') {
@@ -75,7 +77,10 @@ async function init(): Promise<void> {
   // Always listen for messages (toggle, hover, settings) regardless of enabled state
   chrome.runtime.onMessage.addListener(handleMessage);
 
-  if (!enabled) return;
+  if (!enabled) {
+    console.debug('[沉浸式翻译] 翻译未启用，等待用户通过弹窗开启');
+    return;
+  }
 
   if (!apiKey) {
     console.warn('[沉浸式翻译] API Key 未设置，请在插件弹窗中配置 DeepSeek API Key');
@@ -88,6 +93,7 @@ async function init(): Promise<void> {
 function start(): void {
   setupIntersectionObserver();
   setupMutationObserver();
+  setupScrollFallback();
   initHoverTranslator(apiKey);
   initSelectionTranslator(apiKey);
   scanAndObserve();
@@ -102,6 +108,9 @@ function stop(): void {
     mutationObserver.disconnect();
     mutationObserver = null;
   }
+  // Remove scroll fallback listener
+  const cleanup = (setupScrollFallback as unknown as Record<string, unknown>)._cleanup as (() => void) | undefined;
+  if (cleanup) cleanup();
   destroyHoverTranslator();
   destroySelectionTranslator();
   clearQueue();
@@ -118,6 +127,8 @@ function setupIntersectionObserver(): void {
           // Only add if still valid (not yet translated, still in DOM)
           if (el.isConnected && shouldTranslate(el)) {
             addToQueue(el);
+          } else {
+            console.debug(`[沉浸式翻译] IO 跳过: ${el.tagName}${el.className ? '.' + el.className.split(' ')[0] : ''} "${getDirectText(el).slice(0, 50)}"`);
           }
           // Stop observing this element once queued
           observer?.unobserve(el);
@@ -131,29 +142,99 @@ function setupIntersectionObserver(): void {
   );
 }
 
+// --- Viewport helper ---
+
+/** Check if an element is in or near the viewport (matches IntersectionObserver rootMargin). */
+function isElementNearViewport(el: Element): boolean {
+  const rect = el.getBoundingClientRect();
+  const margin = 500; // matches ROOT_MARGIN
+  return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
+}
+
+// --- Scroll fallback (safety net for IntersectionObserver misses) ---
+
+function setupScrollFallback(): void {
+  const onScroll = (): void => {
+    if (scrollTimer) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(() => {
+      // Scan for visible-but-untranslated elements that the IntersectionObserver
+      // may have missed (common on SPAs, lazy-loaded content, virtual scrollers).
+      const allElements = getTranslatableElements(document.body);
+      let queued = 0;
+      for (const el of allElements) {
+        if (queued >= BATCH_SIZE) break;
+        if (!el.hasAttribute(HASH_ATTR) && isElementNearViewport(el)) {
+          addToQueue(el);
+          observer?.unobserve(el);
+          queued++;
+        }
+      }
+    }, 150); // debounce scroll events — only scan after user stops scrolling
+  };
+
+  document.addEventListener('scroll', onScroll, { passive: true, capture: true });
+  // Store cleanup reference via a closure variable
+  (setupScrollFallback as unknown as Record<string, unknown>)._cleanup = () => {
+    document.removeEventListener('scroll', onScroll, { capture: true });
+    if (scrollTimer) clearTimeout(scrollTimer);
+  };
+}
+
 // --- MutationObserver (SPA support) ---
 
 function setupMutationObserver(): void {
+  const pendingRoots = new Set<Element>();
+  let scanTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function processPendingRoots(): void {
+    scanTimer = null;
+    if (pendingRoots.size === 0) return;
+
+    const roots = Array.from(pendingRoots);
+    pendingRoots.clear();
+
+    const seen = new Set<Element>();
+
+    for (const root of roots) {
+      if (!root.isConnected) continue;
+
+      // Scan the added subtree for translatable elements
+      const newElements = getTranslatableElements(root);
+      for (const newEl of newElements) {
+        if (seen.has(newEl)) continue;
+        seen.add(newEl);
+        if (isElementNearViewport(newEl)) {
+          addToQueue(newEl);
+        } else {
+          observeElement(newEl);
+        }
+      }
+
+      // Also check the added node itself
+      if (shouldTranslate(root) && !seen.has(root)) {
+        seen.add(root);
+        if (isElementNearViewport(root)) {
+          addToQueue(root);
+        } else {
+          observeElement(root);
+        }
+      }
+    }
+  }
+
   mutationObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          const el = node as Element;
-          // Skip our own elements
-          if (el.classList.contains(TRANS_BLOCK_CLASS)) continue;
-
-          // Scan the new subtree for translatable elements
-          const newElements = getTranslatableElements(el);
-          for (const newEl of newElements) {
-            observeElement(newEl);
-          }
-
-          // Also check the added node itself
-          if (shouldTranslate(el)) {
-            observeElement(el);
-          }
-        }
+        if (node.nodeType !== Node.ELEMENT_NODE) continue;
+        const el = node as Element;
+        // Skip our own elements
+        if (el.classList.contains(TRANS_BLOCK_CLASS)) continue;
+        pendingRoots.add(el);
       }
+    }
+
+    if (pendingRoots.size > 0 && !scanTimer) {
+      scanTimer = setTimeout(processPendingRoots, DEBOUNCE_MS);
     }
   });
 
@@ -167,6 +248,7 @@ function setupMutationObserver(): void {
 
 function scanAndObserve(): void {
   const elements = getTranslatableElements(document.body);
+  console.debug(`[沉浸式翻译] 扫描完成: 找到 ${elements.length} 个可翻译元素`);
   for (const el of elements) {
     observeElement(el);
   }
@@ -193,6 +275,10 @@ function clearQueue(): void {
   if (debounceTimer) {
     clearTimeout(debounceTimer);
     debounceTimer = null;
+  }
+  if (scrollTimer) {
+    clearTimeout(scrollTimer);
+    scrollTimer = null;
   }
   isTranslating = false;
 }
@@ -302,12 +388,14 @@ function renderTranslation(
   el.classList.add(TRANS_MARKER_CLASS);
   el.setAttribute(HASH_ATTR, hash);
 
-  // Remove CSS truncation so the translation child is visible
-  smashTruncation(el);
-
-  // Append translation as a child <span> (safe inside <p> and any block container)
+  // Insert translation as a sibling <span> after the original element.
+  // Sibling insertion preserves the original element's internal DOM (React/Vue
+  // reconciliation unaffected) and avoids disrupting CSS :nth-child / :last-child
+  // selectors on the original element's children. <span> is safe as a sibling
+  // after any element including <p> (parser auto-close only triggers on block
+  // elements, not inline <span>).
   const block = createTranslationBlock(translatedText);
-  el.appendChild(block);
+  el.insertAdjacentElement('afterend', block);
 }
 
 // --- Message handling ---
@@ -426,6 +514,7 @@ function handleTranslateSelection(): void {
 }
 
 // --- Boot ---
+console.debug('[沉浸式翻译] Content script loaded, waiting for DOM...');
 if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', init);
 } else {

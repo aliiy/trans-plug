@@ -55,20 +55,26 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 
 ### Key runtime behaviors
 
-1. **Lazy translation via scroll**: IntersectionObserver (rootMargin: 300px) monitors block elements. Elements enter queue only when near viewport.
-2. **Batching & dedup**: `Set<Element>` queue, 200ms debounce, 15-element batches per API call.
-3. **Rendering**: `element.insertAdjacentElement('afterend', createTranslationBlock())` — sibling `<div class="imm-trans-block">` below original. Original DOM never modified.
-4. **SPA support**: MutationObserver detects added nodes, scans for translatable elements, binds them to IntersectionObserver.
-5. **Toggle off**: Disconnects observers, removes all `.imm-trans-block` elements, clears queue.
-6. **Caching**: Source text hash → `chrome.storage.local` prefixed `tx_`. Batch cache lookup before API calls.
+1. **Lazy translation via scroll**: IntersectionObserver (rootMargin: 500px) monitors block elements. Elements enter queue only when near viewport. Scroll stop fallback (150ms debounce) rescans visible area for missed elements.
+2. **Batching & dedup**: `Set<Element>` queue, 80ms debounce, 20-element batches per API call. MutationObserver collects added nodes into pending set, batch-scans after debounce.
+3. **Rendering**: `element.insertAdjacentElement('afterend', createTranslationBlock())` — sibling `<span class="imm-trans-block">` below original. Original DOM never modified. No `smashTruncation` needed (translation outside parent's overflow region).
+4. **SPA support**: MutationObserver detects added nodes, debounced (80ms) then batch-scans. Viewport-aware: elements already in viewport go directly to translation queue; others registered with IntersectionObserver.
+5. **Toggle off**: Disconnects observers, removes all `.imm-trans-block` elements, clears queue. Removes scroll listener.
+6. **Caching**: Source text hash (djb2) → `chrome.storage.local` prefixed `tx_`. 7-day TTL, max 5000 entries with LRU eviction (oldest 20% deleted when full). Batch cache lookup before API calls.
 7. **Hover translation**: Alt+mouseover → throttled 150ms → cache → API → tooltip at cursor position.
 8. **Selection translation**: Mouseup on selection → popup near selection rect → cache → API → rendered with copy/close.
 9. **Domain rules**: Checked on content script init. "never" skips entirely. "always" overrides global enabled state.
+10. **Smart filtering**: Semantic chrome detection (nav, footer, sidebar, etc. via boundary-aware regex), fixed/sticky nav skip, non-translatable text patterns (numbers, dates, @mentions, UI labels), horizontal nav item detection.
+11. **API reliability**: 3-retry exponential backoff (1s→2s→4s) on 429/5xx errors. Circuit breaker: 5 consecutive failures → 30s cooldown (returns originals). Non-retryable 4xx errors fail immediately.
 
 ### Element filtering
 
-- **Translate**: `P`, `DIV`, `LI`, `ARTICLE`, `SECTION`, `H1`–`H6`, `TD`, `TH`, `BLOCKQUOTE`, `FIGCAPTION`, `DD`, `DT`, `SUMMARY`, `LABEL`, `LEGEND`, `OPTION`
+- **Translate**: `P`, `LI`, `H1`–`H6`, `BLOCKQUOTE`, `FIGCAPTION`, `DD`, `DT` — always translated
+- **Translate (leaf only)**: `DIV`, `ARTICLE`, `SECTION`, `TD`, `TH`, `SUMMARY`, `LABEL`, `LEGEND`, `OPTION` — only when no block children inside
 - **Skip**: `VIDEO`, `AUDIO`, `CANVAS`, `SVG`, `CODE`, `PRE`, `SCRIPT`, `STYLE`, `IFRAME`, `TEXTAREA`, `INPUT`, `SELECT`, `BUTTON`, `role="button"`, `contenteditable="true"`, elements with `data-imm-skip`
+- **Semantic skip**: Elements inside `<nav>`, `<footer>`, `<aside>`, or ancestors with UI chrome classes (nav, sidebar, breadcrumb, toolbar, etc. — boundary-aware regex). Stops at `<main>`, `<article>`, `[role="main"]` content containers.
+- **Pattern skip**: Pure numbers/dates/amounts, @mentions, #hashtags, single-word UI labels (Login, Submit, Share...), pure emoji, all-uppercase acronyms ≤5 chars
+- **Horizontal nav skip**: Elements whose parent is `display:flex; flex-direction:row` with ≥3 children and element width < 200px
 - **Inline text aggregation**: Direct text nodes extracted from block elements; text in nested inline children (`A`, `SPAN`, `STRONG`, etc.) included; text in nested block children excluded (they get their own translation)
 
 ### API contract
@@ -78,6 +84,9 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 - System prompt: detects source language (English/Japanese), translates to Simplified Chinese, passes through numbers/URLs/code/Chinese unchanged
 - Request: JSON array of strings → Response: JSON array of translations (same order)
 - `stream: false`, `temperature: 0.3`, `max_tokens: 4096`
+- Retry: 3 attempts with exponential backoff (1s→2s→4s) on 429/5xx
+- Circuit breaker: 5 consecutive failures → 30s cooldown. Returns originals during cooldown.
+- Cache: djb2 hash → `chrome.storage.local` with `{t, ts}` format. 7-day TTL, max 5000 entries, LRU eviction.
 
 ### Hard constraints
 
@@ -93,3 +102,13 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 | `toggle-hover` | Background / Popup | Enable/disable hover translation only |
 | `translate-selection` | Background (context menu / Alt+S) | Trigger selection translation |
 | `settings-updated` | Popup | Re-read all settings from chrome.storage |
+
+## graphify
+
+This project has a knowledge graph at graphify-out/ with god nodes, community structure, and cross-file relationships.
+
+Rules:
+- For codebase questions, first run `graphify query "<question>"` when graphify-out/graph.json exists. Use `graphify path "<A>" "<B>"` for relationships and `graphify explain "<concept>"` for focused concepts. These return a scoped subgraph, usually much smaller than GRAPH_REPORT.md or raw grep output.
+- If graphify-out/wiki/index.md exists, use it for broad navigation instead of raw source browsing.
+- Read graphify-out/GRAPH_REPORT.md only for broad architecture review or when query/path/explain do not surface enough context.
+- After modifying code, run `graphify update .` to keep the graph current (AST-only, no API cost).

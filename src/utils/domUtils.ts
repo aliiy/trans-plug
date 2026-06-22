@@ -11,7 +11,9 @@ const TRANSLATABLE_TAGS = new Set([
 
 /** Tags eligible ONLY if they contain no block-level children (leaf text containers).
  *  These are commonly used as layout containers in modern sites — translating them
- *  when they have block children adds extra flex/grid items and breaks layout. */
+ *  when they have block children would insert a translation sibling that duplicates
+ *  text already translated via individual child blocks, and adds an extra item in
+ *  the parent's flex/grid layout. */
 const LEAF_CONTAINER_TAGS = new Set([
   'DIV', 'ARTICLE', 'SECTION', 'TD', 'TH',
   'SUMMARY', 'LABEL', 'LEGEND', 'OPTION',
@@ -24,6 +26,31 @@ const SKIP_TAGS = new Set([
   'EMBED', 'TEXTAREA', 'INPUT', 'SELECT', 'BUTTON',
 ]);
 
+/** Semantic container tags — entire content inside these is never translated. */
+const SEMANTIC_SKIP_TAGS = new Set(['NAV', 'FOOTER', 'ASIDE']);
+
+/**
+ * CSS class patterns that indicate non-translatable UI chrome.
+ * Short patterns (≤5 chars) use boundary matching to avoid false positives
+ * (e.g. "nav" matches "nav-bar" but NOT "canvas").
+ * Longer patterns use substring matching (e.g. "breadcrumb" anywhere in class).
+ */
+const UI_CHROME_SHORT = /\b(nav|menu|side|aside|footer|toolbar|pager|byline)\b/i;
+const UI_CHROME_LONG = /(navbar|navigation|dropdown|breadcrumb|pagination|timestamp|comment-meta)/i;
+const UI_CHROME_RE = new RegExp(UI_CHROME_SHORT.source + '|' + UI_CHROME_LONG.source, 'i');
+
+/** Single-word UI labels that should never be translated (English, case-insensitive). */
+const UI_LABELS = new Set([
+  'login', 'logout', 'signup', 'signin', 'register',
+  'submit', 'cancel', 'delete', 'edit', 'save', 'close',
+  'share', 'reply', 'like', 'follow', 'subscribe', 'unsubscribe',
+  'next', 'prev', 'previous', 'back', 'more', 'less',
+  'search', 'reset', 'clear', 'apply', 'confirm', 'ok',
+  'copy', 'paste', 'cut', 'undo', 'redo', 'retry',
+  'menu', 'settings', 'help', 'about', 'home', 'profile',
+  'download', 'upload', 'print', 'refresh', 'reload',
+]);
+
 /** CSS class marking a translation block inserted by us. */
 export const TRANS_BLOCK_CLASS = 'imm-trans-block';
 
@@ -32,6 +59,95 @@ export const TRANS_MARKER_CLASS = 'imm-translated';
 
 /** Data attribute storing the cache hash on the original element. */
 export const HASH_ATTR = 'data-imm-hash';
+
+/**
+ * Check if an element (or any ancestor) is inside a semantic skip container:
+ * <nav>, <footer>, <aside>, or an element whose CSS class indicates UI chrome.
+ * Exceptions: <header> inside <article> or <main> is treated as content, not chrome.
+ */
+function isInsideSemanticChrome(el: Element): boolean {
+  let current: Element | null = el;
+  while (current) {
+    const tag = current.tagName;
+    // Stop walking at content containers — everything inside is safe to translate
+    if (tag === 'MAIN' || tag === 'ARTICLE') return false;
+    if (current.getAttribute('role') === 'main') return false;
+
+    // Skip semantic containers
+    if (SEMANTIC_SKIP_TAGS.has(tag)) return true;
+    // <header> is only skipped if it's page-level (not inside article/main)
+    if (tag === 'HEADER') {
+      const parent = current.parentElement;
+      const parentTag = parent?.tagName ?? '';
+      if (parentTag !== 'ARTICLE' && parentTag !== 'MAIN') return true;
+    }
+
+    // Check class names for UI chrome (boundary-aware regex)
+    const cls = (current.className || '') as string;
+    if (typeof cls === 'string' && cls.length > 0 && UI_CHROME_RE.test(cls)) {
+      return true;
+    }
+
+    current = current.parentElement;
+    if (current?.tagName === 'BODY') break;
+  }
+  return false;
+}
+
+/**
+ * Check if an element is a fixed/sticky nav element near the top of the viewport.
+ * These are almost always navigation bars and should not be translated.
+ */
+function isFixedNavElement(el: Element): boolean {
+  const style = getComputedStyle(el);
+  if (style.position !== 'fixed' && style.position !== 'sticky') return false;
+  const rect = el.getBoundingClientRect();
+  // Near the top of the viewport and not full-width content
+  return rect.top <= 80 && rect.height < window.innerHeight * 0.6;
+}
+
+/**
+ * Check if text looks like something that should NOT be translated:
+ * pure numbers/dates/amounts, @mentions, #tags, single-word UI labels, pure emoji.
+ */
+function isNonTranslatableText(text: string): boolean {
+  const t = text.trim();
+
+  // Pure numbers, dates, amounts, percentages
+  if (/^[\d.,+\-*/=:/\s%$€£¥]+$/.test(t)) return true;
+  // ISO-style dates: 2024-01-01, 01/01/2024
+  if (/^\d{2,4}[-/]\d{1,2}[-/]\d{1,4}$/.test(t)) return true;
+  // @mentions and #hashtags
+  if (/^[@#]\w{1,30}$/.test(t)) return true;
+  // Pure emoji/symbols (no CJK, no Latin letters)
+  if (/^[\p{Emoji}\p{S}\s]+$/u.test(t) && !/[a-zA-Z一-鿿぀-ゟ゠-ヿ]/.test(t)) return true;
+  // Single-word UI label (case-insensitive)
+  const word = t.toLowerCase().replace(/[.!?…]+$/, '');
+  if (UI_LABELS.has(word)) return true;
+  // Very short all-uppercase text (likely acronyms, nav labels, button text)
+  if (t.length <= 5 && /^[A-Z\s]+$/.test(t) && !/[a-z]/.test(t)) return true;
+
+  return false;
+}
+
+/**
+ * Check if an element is likely a horizontal navigation item (not content text).
+ */
+function isHorizontalNavItem(el: Element): boolean {
+  const parent = el.parentElement;
+  if (!parent) return false;
+  const parentStyle = getComputedStyle(parent);
+  const isFlexRow = parentStyle.display === 'flex' &&
+    (parentStyle.flexDirection === 'row' || parentStyle.flexDirection.startsWith('row'));
+  if (!isFlexRow) return false;
+
+  // Parent has many children (likely a list of nav items)
+  if (parent.children.length < 3) return false;
+
+  // Element is narrow (nav items are typically short)
+  const rect = el.getBoundingClientRect();
+  return rect.width < 200;
+}
 
 /**
  * Determine whether an element's text content should be translated.
@@ -49,6 +165,12 @@ export function shouldTranslate(el: Element): boolean {
 
   // Skip if inside a code block or file listing
   if (isInsideCodeBlock(el)) return false;
+
+  // Skip if inside semantic chrome (nav, footer, sidebar, etc.)
+  if (isInsideSemanticChrome(el)) return false;
+
+  // Skip fixed/sticky nav elements near the viewport top
+  if (isFixedNavElement(el)) return false;
 
   // Skip if already has a translation
   if (el.hasAttribute(HASH_ATTR)) return false;
@@ -70,9 +192,15 @@ export function shouldTranslate(el: Element): boolean {
     return false;
   }
 
+  // Skip horizontal nav items (flex-row children in nav-like containers)
+  if (isHorizontalNavItem(el)) return false;
+
   // Get direct text content (not from nested block children we'll translate separately)
   const directText = getDirectText(el);
   if (directText.length < 2) return false; // skip very short / empty
+
+  // Skip non-translatable text patterns (numbers, dates, @mentions, UI labels)
+  if (isNonTranslatableText(directText)) return false;
 
   return true;
 }
@@ -143,7 +271,8 @@ const BLOCK_TAGS = new Set([
 /**
  * Check if an element is a "leaf" text container — it has text content but
  * no block-level child elements. Such elements are safe to translate because
- * appending a child span won't alter a flex/grid layout.
+ * inserting a translation sibling won't duplicate text content already
+ * translated via individual child blocks.
  */
 function isLeafTextContainer(el: Element): boolean {
   for (const child of el.children) {
@@ -217,9 +346,13 @@ export function getTranslatableElements(root: Element = document.body): Element[
 
 /**
  * Create a translation block element. NEVER uses innerHTML.
- * Uses a <span> (display:block via CSS) so it safely nests inside <p> and other
- * elements that don't allow <div> children. Only shows the translation —
- * the original text is already visible in the element above.
+ * Returns a <span> (display:block via CSS) inserted as a sibling after the
+ * original element via insertAdjacentElement('afterend', ...). <span> is used
+ * instead of <div> because it is valid phrasing content in any HTML context
+ * (inside <p>, <li>, etc.) — though sibling insertion via the DOM API bypasses
+ * the HTML parser, <span> remains the safest choice.
+ * Only shows the translation — the original text is already visible in the
+ * element above.
  */
 export function createTranslationBlock(translatedText: string): HTMLElement {
   const span = document.createElement('span');
@@ -229,9 +362,12 @@ export function createTranslationBlock(translatedText: string): HTMLElement {
 }
 
 /**
- * Remove CSS truncation from an element so the appended translation is visible.
+ * Remove CSS truncation from an element. Retained for edge cases where a
+ * translation must be placed inside a truncated container. No longer called
+ * by the default renderTranslation() path — with sibling insertion the
+ * translation lives outside the element's overflow clipping region.
  * Many sites use -webkit-line-clamp / max-height + overflow:hidden to truncate
- * card previews, which would hide an appended child translation.
+ * card previews. Only modifies inline styles; does not touch computed styles.
  */
 export function smashTruncation(el: Element): void {
   const style = (el as HTMLElement).style;
