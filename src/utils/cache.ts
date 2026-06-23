@@ -19,16 +19,29 @@ const MAX_ENTRIES = 5000;
 /** Cache TTL in milliseconds (7 days). */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** In-memory cache for synchronous lookups (eliminates virtual-scroll translation flash). */
+const memCache = new Map<string, string>();
+
 interface CacheEntry {
   t: string;
   ts: number;
 }
 
+/** Normalize text for stable hashing: trim, collapse whitespace, normalize line endings. */
+function normalizeText(text: string): string {
+  return text
+    .replace(/\r\n?/g, '\n')
+    .replace(/[\t ]+/g, ' ')
+    .replace(/ *\n */g, '\n')
+    .trim();
+}
+
 /** Fast non-cryptographic hash (djb2 variant) for cache key generation. */
 export function hashContent(text: string): string {
+  const normalized = normalizeText(text);
   let hash = 5381;
-  for (let i = 0; i < text.length; i++) {
-    hash = ((hash << 5) + hash) ^ text.charCodeAt(i);
+  for (let i = 0; i < normalized.length; i++) {
+    hash = ((hash << 5) + hash) ^ normalized.charCodeAt(i);
     hash = hash | 0; // clamp to 32-bit int
   }
   return CACHE_PREFIX + (hash >>> 0).toString(36);
@@ -54,14 +67,30 @@ function parseEntry(key: string, raw: unknown): string | null {
   return null;
 }
 
+/** Synchronous cache lookup — checks both memory and returns null if not in memory. */
+export function getCachedSync(hash: string): string | null {
+  return memCache.get(hash) ?? null;
+}
+
 /** Look up a cached translation. Returns null if not cached or expired. */
 export async function getCached(hash: string): Promise<string | null> {
+  // Check memory cache first
+  const memHit = memCache.get(hash);
+  if (memHit !== undefined) return memHit;
+
   const result = await STORAGE.get(hash);
-  return parseEntry(hash, result[hash]);
+  const translation = parseEntry(hash, result[hash]);
+  if (translation !== null) {
+    memCache.set(hash, translation);
+  }
+  return translation;
 }
 
 /** Store a translation in cache with current timestamp. Triggers eviction if needed. */
 export async function setCached(hash: string, translation: string): Promise<void> {
+  // Write to memory immediately (synchronous for virtual-scroll recovery)
+  memCache.set(hash, translation);
+
   const entry: CacheEntry = { t: translation, ts: Date.now() };
   await STORAGE.set({ [hash]: entry });
 
@@ -73,20 +102,43 @@ export async function setCached(hash: string, translation: string): Promise<void
 export async function getCachedBatch(
   hashes: string[]
 ): Promise<Map<string, string>> {
-  const result = await STORAGE.get(hashes);
   const map = new Map<string, string>();
-  for (const [key, value] of Object.entries(result)) {
-    if (!key.startsWith(CACHE_PREFIX)) continue;
-    const translation = parseEntry(key, value);
-    if (translation !== null) {
-      map.set(key, translation);
+  const storageHashes: string[] = [];
+
+  // Check memory cache first (synchronous)
+  for (const hash of hashes) {
+    const memHit = memCache.get(hash);
+    if (memHit !== undefined) {
+      map.set(hash, memHit);
+    } else {
+      storageHashes.push(hash);
     }
   }
+
+  // Only query storage for misses
+  if (storageHashes.length > 0) {
+    const result = await STORAGE.get(storageHashes);
+    for (const [key, value] of Object.entries(result)) {
+      if (!key.startsWith(CACHE_PREFIX)) continue;
+      const translation = parseEntry(key, value);
+      if (translation !== null) {
+        map.set(key, translation);
+        memCache.set(key, translation); // promote to memory
+      }
+    }
+  }
+
   return map;
+}
+
+/** Clear memory cache (e.g., on clearCache). */
+export function clearMemCache(): void {
+  memCache.clear();
 }
 
 /** Remove all cached translations. */
 export async function clearCache(): Promise<void> {
+  clearMemCache();
   const all = await STORAGE.get(null);
   const keysToRemove: string[] = [];
   for (const key of Object.keys(all)) {

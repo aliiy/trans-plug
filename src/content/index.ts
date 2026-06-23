@@ -42,6 +42,7 @@ let hoverEnabled = true;
 let observer: IntersectionObserver | null = null;
 let mutationObserver: MutationObserver | null = null;
 let scrollTimer: ReturnType<typeof setTimeout> | null = null;
+let isInserting = false; // guard — prevent MO from firing on our own DOM insertions
 const queue = new Set<Element>();
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 let isTranslating = false;
@@ -223,6 +224,9 @@ function setupMutationObserver(): void {
   }
 
   mutationObserver = new MutationObserver((mutations) => {
+    // Skip if we're in the middle of inserting translation blocks ourselves
+    if (isInserting) return;
+
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (node.nodeType !== Node.ELEMENT_NODE) continue;
@@ -355,16 +359,24 @@ async function translateAndRender(elements: Element[]): Promise<void> {
 
   // Render cache hits immediately
   for (const hit of hits) {
+    // Skip elements removed from DOM while waiting
+    if (!hit.el.isConnected) continue;
     renderTranslation(hit.el, hit.text, hit.translation, hit.hash);
   }
 
   // Translate cache misses via API
   if (misses.length > 0) {
-    const texts = misses.map((m) => m.text);
+    // Filter out elements already removed from DOM (saves API quota)
+    const liveMisses = misses.filter(m => m.el.isConnected);
+    if (liveMisses.length === 0) return;
+
+    const texts = liveMisses.map((m) => m.text);
     const translations = await translateBatch(texts, apiKey);
 
-    for (let i = 0; i < misses.length; i++) {
-      const { el, text, hash } = misses[i];
+    for (let i = 0; i < liveMisses.length; i++) {
+      const { el, text, hash } = liveMisses[i];
+      // Double-check still connected after API call
+      if (!el.isConnected) continue;
       const translation = translations[i] ?? text;
       await setCached(hash, translation);
       renderTranslation(el, text, translation, hash);
@@ -378,6 +390,9 @@ function renderTranslation(
   translatedText: string,
   hash: string
 ): void {
+  // Skip if element was removed from DOM while we were waiting for API
+  if (!el.isConnected) return;
+
   // Skip if translation is same as original (already Chinese, numbers, etc.)
   if (translatedText === originalText) {
     el.setAttribute(HASH_ATTR, hash);
@@ -388,6 +403,9 @@ function renderTranslation(
   el.classList.add(TRANS_MARKER_CLASS);
   el.setAttribute(HASH_ATTR, hash);
 
+  // Guard MutationObserver from firing on our own insertion
+  isInserting = true;
+
   // Insert translation as a sibling <span> after the original element.
   // Sibling insertion preserves the original element's internal DOM (React/Vue
   // reconciliation unaffected) and avoids disrupting CSS :nth-child / :last-child
@@ -396,6 +414,9 @@ function renderTranslation(
   // elements, not inline <span>).
   const block = createTranslationBlock(translatedText);
   el.insertAdjacentElement('afterend', block);
+
+  // Release the guard after the browser has processed the insertion
+  requestAnimationFrame(() => { isInserting = false; });
 }
 
 // --- Message handling ---

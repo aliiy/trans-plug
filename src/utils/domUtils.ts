@@ -110,6 +110,32 @@ function isFixedNavElement(el: Element): boolean {
  * Check if text looks like something that should NOT be translated:
  * pure numbers/dates/amounts, @mentions, #tags, single-word UI labels, pure emoji.
  */
+/**
+ * Check if text is already mostly CJK — the user can read it without translation.
+ * Returns true if >50% of alphabetic+CJK chars are Chinese/Japanese/Korean.
+ */
+function hasHighChineseRatio(text: string): boolean {
+  let total = 0;
+  let cjk = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    // Count letters + CJK characters as "meaningful" chars
+    const isLetter = (cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A); // A-Z a-z
+    const isCJK = (cp >= 0x4E00 && cp <= 0x9FFF) || // CJK Unified
+      (cp >= 0x3040 && cp <= 0x309F) || // Hiragana
+      (cp >= 0x30A0 && cp <= 0x30FF) || // Katakana
+      (cp >= 0xAC00 && cp <= 0xD7AF);   // Hangul
+    if (isLetter || isCJK) {
+      total++;
+      if (isCJK) cjk++;
+    }
+  }
+  // If practically no meaningful chars, don't skip (let other filters handle it)
+  if (total < 3) return false;
+  // Skip if >50% of meaningful chars are already CJK
+  return cjk / total > 0.5;
+}
+
 function isNonTranslatableText(text: string): boolean {
   const t = text.trim();
 
@@ -198,6 +224,9 @@ export function shouldTranslate(el: Element): boolean {
   // Get direct text content (not from nested block children we'll translate separately)
   const directText = getDirectText(el);
   if (directText.length < 2) return false; // skip very short / empty
+
+  // Skip if text is already mostly Chinese (user can read it, no need to translate)
+  if (hasHighChineseRatio(directText)) return false;
 
   // Skip non-translatable text patterns (numbers, dates, @mentions, UI labels)
   if (isNonTranslatableText(directText)) return false;
