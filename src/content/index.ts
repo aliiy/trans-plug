@@ -31,9 +31,10 @@ import {
 } from './selection-translator';
 
 // --- Constants ---
-const BATCH_SIZE = 20;
-const DEBOUNCE_MS = 80;
-const ROOT_MARGIN = '500px 0px';
+const BATCH_SIZE = 25;
+const DEBOUNCE_MS = 50;
+const ROOT_MARGIN = '800px 0px';
+const MAX_PARALLEL = 3; // max concurrent API calls
 
 // --- State ---
 let enabled = false;
@@ -45,7 +46,7 @@ let scrollTimer: ReturnType<typeof setTimeout> | null = null;
 let isInserting = false; // guard — prevent MO from firing on our own DOM insertions
 const queue = new Set<Element>();
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-let isTranslating = false;
+let activeJobs = 0; // concurrent API call counter (was boolean isTranslating)
 let domainAction: 'always' | 'never' | 'default' = 'default';
 
 // --- Initialization ---
@@ -148,7 +149,7 @@ function setupIntersectionObserver(): void {
 /** Check if an element is in or near the viewport (matches IntersectionObserver rootMargin). */
 function isElementNearViewport(el: Element): boolean {
   const rect = el.getBoundingClientRect();
-  const margin = 500; // matches ROOT_MARGIN
+  const margin = 800; // matches ROOT_MARGIN
   return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
 }
 
@@ -170,7 +171,7 @@ function setupScrollFallback(): void {
           queued++;
         }
       }
-    }, 150); // debounce scroll events — only scan after user stops scrolling
+    }, 100); // debounce scroll events — faster scan for fast scrollers
   };
 
   document.addEventListener('scroll', onScroll, { passive: true, capture: true });
@@ -266,12 +267,19 @@ function observeElement(el: Element): void {
 
 function addToQueue(el: Element): void {
   queue.add(el);
-  scheduleFlush();
+  // If jobs are already running, don't debounce — dispatch next batch immediately
+  if (activeJobs > 0 && activeJobs < MAX_PARALLEL) {
+    flushQueue();
+  } else {
+    scheduleFlush();
+  }
 }
 
 function scheduleFlush(): void {
   if (debounceTimer) clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(flushQueue, DEBOUNCE_MS);
+  // First batch gets shorter debounce; subsequent batches are already fast
+  const delay = activeJobs === 0 ? DEBOUNCE_MS : 0;
+  debounceTimer = setTimeout(flushQueue, delay);
 }
 
 function clearQueue(): void {
@@ -284,14 +292,12 @@ function clearQueue(): void {
     clearTimeout(scrollTimer);
     scrollTimer = null;
   }
-  isTranslating = false;
+  activeJobs = 0;
 }
 
-async function flushQueue(): Promise<void> {
-  if (isTranslating || queue.size === 0) return;
+function flushQueue(): void {
+  if (activeJobs >= MAX_PARALLEL || queue.size === 0) return;
   if (!apiKey) return;
-
-  isTranslating = true;
 
   // Take a batch from the queue
   const batch: Element[] = [];
@@ -311,24 +317,22 @@ async function flushQueue(): Promise<void> {
   }
 
   if (batch.length === 0) {
-    isTranslating = false;
     // If queue still has items, schedule another flush
     if (queue.size > 0) scheduleFlush();
     return;
   }
 
-  try {
-    await translateAndRender(batch);
-  } catch (err) {
-    console.error('[沉浸式翻译] 批量翻译失败:', err);
-  }
-
-  isTranslating = false;
-
-  // If more items accumulated, flush again
-  if (queue.size > 0) {
-    scheduleFlush();
-  }
+  // Fire and forget — don't await, let batches run in parallel
+  activeJobs++;
+  translateAndRender(batch)
+    .catch(err => console.error('[沉浸式翻译] 批量翻译失败:', err))
+    .finally(() => {
+      activeJobs--;
+      // If more items accumulated, keep the pipeline going
+      if (queue.size > 0) {
+        flushQueue();
+      }
+    });
 }
 
 async function translateAndRender(elements: Element[]): Promise<void> {
