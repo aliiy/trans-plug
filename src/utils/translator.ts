@@ -11,10 +11,13 @@
 const API_URL = 'https://api.deepseek.com/v1/chat/completions';
 const MODEL = 'deepseek-v4-flash';
 
-const SYSTEM_PROMPT = `You are a translator. Detect if the input text is English or Japanese.
-Translate it into Simplified Chinese.
-If the input contains numbers, URLs, code, or is already Chinese, output it unchanged.
-Return a valid JSON array only, matching the input order. No extra text.`;
+const SYSTEM_PROMPT = `You are a professional translator. The input is a JSON array of strings.
+For each string, auto-detect its source language (English, Japanese, Russian, Korean, or any other) and translate it into natural, fluent Simplified Chinese.
+Rules:
+- Keep numbers, URLs, email addresses, file paths, code, and @mentions unchanged.
+- If a string is already entirely Simplified Chinese, return it unchanged.
+- Translate the full meaning; never add explanations, notes, or romanization.
+- Output ONLY a valid JSON array of strings, with the same length and order as the input. No markdown, no extra text.`;
 
 // --- Retry & Circuit Breaker State ---
 

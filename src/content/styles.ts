@@ -13,8 +13,10 @@ export const STYLES = /* css */ `
   margin-block: 0.15em 0;
   animation: imm-fade-in 0.25s ease-out;
   max-width: 100%;
+  box-sizing: border-box;
+  color: inherit;
   overflow-wrap: break-word;
-  word-break: break-word;
+  word-break: normal;
 }
 /* Marker on the original element (no forced style changes — let it flow naturally) */
 .imm-translated {

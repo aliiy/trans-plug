@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Chrome/Edge browser extension (Manifest V3, TypeScript) for immersive bilingual translation. Detects English/Japanese text in block-level elements on any page, translates to Simplified Chinese via the DeepSeek API, and inserts styled translation blocks below originals. Also supports hover translation, selection translation, keyboard shortcuts, and per-domain rules.
+Chrome/Edge browser extension (Manifest V3, TypeScript) for immersive bilingual translation. Detects English/Japanese/Russian (and other foreign-language) text in block-level elements on any page, translates to Simplified Chinese via the DeepSeek API, and inserts styled translation blocks below originals. Also supports hover translation, selection translation, keyboard shortcuts, and per-domain rules.
 
 ## Build & Development
 
@@ -55,10 +55,10 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 
 ### Key runtime behaviors
 
-1. **Lazy translation via scroll**: IntersectionObserver (rootMargin: 500px) monitors block elements. Elements enter queue only when near viewport. Scroll stop fallback (150ms debounce) rescans visible area for missed elements.
-2. **Batching & dedup**: `Set<Element>` queue, 80ms debounce, 20-element batches per API call. MutationObserver collects added nodes into pending set, batch-scans after debounce.
-3. **Rendering**: `element.insertAdjacentElement('afterend', createTranslationBlock())` — sibling `<span class="imm-trans-block">` below original. Original DOM never modified. No `smashTruncation` needed (translation outside parent's overflow region).
-4. **SPA support**: MutationObserver detects added nodes, debounced (80ms) then batch-scans. Viewport-aware: elements already in viewport go directly to translation queue; others registered with IntersectionObserver.
+1. **Lazy, viewport-prioritized translation**: IntersectionObserver (rootMargin: 800px) monitors block elements; elements enter the queue only when near the viewport. Each flush translates the elements nearest the viewport first (visible, then about-to-enter below), so scrolling redirects translation to the current position instead of grinding through the backlog above. Scroll-stop fallback (100ms debounce) rescans the visible area for missed elements.
+2. **Batching & dedup**: `Set<Element>` queue, 50ms debounce, viewport-prioritized 15-element batches, up to 3 concurrent API calls. Elements are marked in-flight (`data-imm-pending`) the moment they enter a batch so concurrent detection paths don't re-queue them — this prevents duplicate translation blocks while scrolling. MutationObserver collects added nodes into a pending set, batch-scans after debounce.
+3. **Rendering**: a `<span class="imm-trans-block">` is inserted below the original — as a sibling (`insertAdjacentElement('afterend', …)`) by default, or nested inside the original when its parent is a flex/grid container (so the translation doesn't become a stray flex/grid item and break the layout). Original DOM otherwise unmodified. Cache writes are batched and fire-and-forget so they never block rendering.
+4. **SPA support**: MutationObserver detects added nodes, debounced (50ms) then batch-scans. Viewport-aware: elements already in viewport go directly to translation queue; others registered with IntersectionObserver.
 5. **Toggle off**: Disconnects observers, removes all `.imm-trans-block` elements, clears queue. Removes scroll listener.
 6. **Caching**: Source text hash (djb2) → `chrome.storage.local` prefixed `tx_`. 7-day TTL, max 5000 entries with LRU eviction (oldest 20% deleted when full). Batch cache lookup before API calls.
 7. **Hover translation**: Alt+mouseover → throttled 150ms → cache → API → tooltip at cursor position.
@@ -81,7 +81,7 @@ Popup ←──chrome.storage.local──→ (read by content script on init)
 
 - Endpoint: `https://api.deepseek.com/v1/chat/completions`
 - Model: `deepseek-v4-flash`
-- System prompt: detects source language (English/Japanese), translates to Simplified Chinese, passes through numbers/URLs/code/Chinese unchanged
+- System prompt: auto-detects source language (English/Japanese/Russian/Korean/any), translates to Simplified Chinese, passes through numbers/URLs/code/Chinese unchanged
 - Request: JSON array of strings → Response: JSON array of translations (same order)
 - `stream: false`, `temperature: 0.3`, `max_tokens: 4096`
 - Retry: 3 attempts with exponential backoff (1s→2s→4s) on 429/5xx

@@ -60,6 +60,10 @@ export const TRANS_MARKER_CLASS = 'imm-translated';
 /** Data attribute storing the cache hash on the original element. */
 export const HASH_ATTR = 'data-imm-hash';
 
+/** Data attribute marking an element whose translation is in-flight (API pending).
+ *  Prevents concurrent detection paths from re-queuing and duplicating it. */
+export const PENDING_ATTR = 'data-imm-pending';
+
 /**
  * Check if an element (or any ancestor) is inside a semantic skip container:
  * <nav>, <footer>, <aside>, or an element whose CSS class indicates UI chrome.
@@ -107,35 +111,46 @@ function isFixedNavElement(el: Element): boolean {
 }
 
 /**
+ * Check whether text is already readable by a Simplified-Chinese reader: mostly
+ * Han characters with NO Japanese kana and NO Korean hangul.
+ *
+ * Han alone is ambiguous — Japanese Kanji share the Unicode block U+4E00–U+9FFF
+ * with Chinese. The deciding signal is kana/hangul: any hiragana, katakana, or
+ * hangul means the text is Japanese/Korean and MUST be translated, no matter how
+ * many Han characters it also contains. (The previous version counted kana and
+ * hangul as "CJK" and so silently skipped virtually all Japanese/Korean text.)
+ * Cyrillic and Latin count toward the total, so a mostly-Russian/English line
+ * with a few stray Han characters is not mistaken for Chinese.
+ */
+function isAlreadyChineseReadable(text: string): boolean {
+  let total = 0;
+  let han = 0;
+  for (const ch of text) {
+    const cp = ch.codePointAt(0) ?? 0;
+    // Japanese kana or Korean hangul → not Chinese, needs translation.
+    if ((cp >= 0x3040 && cp <= 0x309F) || // Hiragana
+        (cp >= 0x30A0 && cp <= 0x30FF) || // Katakana
+        (cp >= 0xAC00 && cp <= 0xD7AF)) { // Hangul
+      return false;
+    }
+    const isLatin = (cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A);
+    const isCyrillic = cp >= 0x0400 && cp <= 0x04FF;
+    const isHan = cp >= 0x4E00 && cp <= 0x9FFF; // CJK Unified Ideographs
+    if (isLatin || isCyrillic || isHan) {
+      total++;
+      if (isHan) han++;
+    }
+  }
+  // Too few meaningful chars to judge — let other filters decide.
+  if (total < 3) return false;
+  // Mostly Han and no kana/hangul → Chinese the user can already read.
+  return han / total > 0.5;
+}
+
+/**
  * Check if text looks like something that should NOT be translated:
  * pure numbers/dates/amounts, @mentions, #tags, single-word UI labels, pure emoji.
  */
-/**
- * Check if text is already mostly CJK — the user can read it without translation.
- * Returns true if >50% of alphabetic+CJK chars are Chinese/Japanese/Korean.
- */
-function hasHighChineseRatio(text: string): boolean {
-  let total = 0;
-  let cjk = 0;
-  for (const ch of text) {
-    const cp = ch.codePointAt(0) ?? 0;
-    // Count letters + CJK characters as "meaningful" chars
-    const isLetter = (cp >= 0x41 && cp <= 0x5A) || (cp >= 0x61 && cp <= 0x7A); // A-Z a-z
-    const isCJK = (cp >= 0x4E00 && cp <= 0x9FFF) || // CJK Unified
-      (cp >= 0x3040 && cp <= 0x309F) || // Hiragana
-      (cp >= 0x30A0 && cp <= 0x30FF) || // Katakana
-      (cp >= 0xAC00 && cp <= 0xD7AF);   // Hangul
-    if (isLetter || isCJK) {
-      total++;
-      if (isCJK) cjk++;
-    }
-  }
-  // If practically no meaningful chars, don't skip (let other filters handle it)
-  if (total < 3) return false;
-  // Skip if >50% of meaningful chars are already CJK
-  return cjk / total > 0.5;
-}
-
 function isNonTranslatableText(text: string): boolean {
   const t = text.trim();
 
@@ -181,7 +196,7 @@ function isHorizontalNavItem(el: Element): boolean {
  * interactive, or already processed.
  */
 export function shouldTranslate(el: Element): boolean {
-  // Skip by tag name
+  // --- Cheap tag / attribute checks first (no layout reads, no DOM walks) ---
   if (SKIP_TAGS.has(el.tagName)) return false;
 
   // Skip interactive / editable elements
@@ -189,47 +204,46 @@ export function shouldTranslate(el: Element): boolean {
   if (el.getAttribute('contenteditable') === 'true') return false;
   if (el.hasAttribute('data-imm-skip')) return false;
 
-  // Skip if inside a code block or file listing
-  if (isInsideCodeBlock(el)) return false;
-
-  // Skip if inside semantic chrome (nav, footer, sidebar, etc.)
-  if (isInsideSemanticChrome(el)) return false;
-
-  // Skip fixed/sticky nav elements near the viewport top
-  if (isFixedNavElement(el)) return false;
-
-  // Skip if already has a translation
+  // Skip if already processed, or one of our own translation blocks
   if (el.hasAttribute(HASH_ATTR)) return false;
+  if (el.hasAttribute(PENDING_ATTR)) return false; // translation already in-flight
   if (el.classList.contains(TRANS_MARKER_CLASS)) return false;
-
-  // Skip our own translation blocks
   if (el.classList.contains(TRANS_BLOCK_CLASS)) return false;
 
-  // Must be a translatable tag (or have explicit data-imm-translate)
+  // Must be a translatable tag (or explicitly opted-in via data-imm-translate)
   const tag = el.tagName;
   const isExplicit = el.hasAttribute('data-imm-translate');
   if (!TRANSLATABLE_TAGS.has(tag) && !LEAF_CONTAINER_TAGS.has(tag) && !isExplicit) {
     return false;
   }
 
-  // Layout containers (DIV, ARTICLE, SECTION, TD, TH, etc.) only translate
-  // if they're leaf text containers — no block children inside.
+  // --- Text checks (DOM reads only, no forced layout) ---
+  // Run before the getComputedStyle/getBoundingClientRect heuristics below so
+  // that empty, already-readable, or non-translatable elements bail out cheaply
+  // without triggering a layout reflow.
+  const directText = getDirectText(el);
+  if (directText.length < 2) return false; // skip very short / empty
+  // Skip text already readable as Chinese (Han without Japanese kana / Korean hangul)
+  if (isAlreadyChineseReadable(directText)) return false;
+  // Skip non-translatable patterns (numbers, dates, @mentions, UI labels)
+  if (isNonTranslatableText(directText)) return false;
+
+  // --- Ancestor walks (medium cost) ---
+  if (isInsideCodeBlock(el)) return false;
+  if (isInsideSemanticChrome(el)) return false;
+
+  // Layout containers (DIV, ARTICLE, SECTION, TD, TH, etc.) only translate when
+  // they're leaf text containers — no block children inside. isLeafTextContainer
+  // reads getComputedStyle per child, so it is gated behind the cheaper checks.
   if (LEAF_CONTAINER_TAGS.has(tag) && !isLeafTextContainer(el)) {
     return false;
   }
 
+  // --- Layout-reading nav heuristics (most expensive) last ---
+  // Skip fixed/sticky nav bars near the viewport top
+  if (isFixedNavElement(el)) return false;
   // Skip horizontal nav items (flex-row children in nav-like containers)
   if (isHorizontalNavItem(el)) return false;
-
-  // Get direct text content (not from nested block children we'll translate separately)
-  const directText = getDirectText(el);
-  if (directText.length < 2) return false; // skip very short / empty
-
-  // Skip if text is already mostly Chinese (user can read it, no need to translate)
-  if (hasHighChineseRatio(directText)) return false;
-
-  // Skip non-translatable text patterns (numbers, dates, @mentions, UI labels)
-  if (isNonTranslatableText(directText)) return false;
 
   return true;
 }
@@ -425,6 +439,10 @@ export function removeAllTranslations(): void {
   for (const el of document.querySelectorAll(`.${TRANS_MARKER_CLASS}`)) {
     el.classList.remove(TRANS_MARKER_CLASS);
     el.removeAttribute(HASH_ATTR);
+  }
+  // Clear any in-flight markers so a re-enable starts fresh
+  for (const el of document.querySelectorAll(`[${PENDING_ATTR}]`)) {
+    el.removeAttribute(PENDING_ATTR);
   }
 }
 

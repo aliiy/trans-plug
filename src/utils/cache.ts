@@ -19,8 +19,23 @@ const MAX_ENTRIES = 5000;
 /** Cache TTL in milliseconds (7 days). */
 const TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
-/** In-memory cache for synchronous lookups (eliminates virtual-scroll translation flash). */
+/** Max in-memory cache entries — bounds memory on long-lived SPA sessions. */
+const MAX_MEM_ENTRIES = 2000;
+
+/** In-memory cache for fast synchronous lookups, bounded to MAX_MEM_ENTRIES. */
 const memCache = new Map<string, string>();
+
+/**
+ * Write to the in-memory cache, evicting the oldest entry when over capacity.
+ * Map preserves insertion order, so the first key is the oldest (FIFO).
+ */
+function memSet(hash: string, translation: string): void {
+  memCache.set(hash, translation);
+  if (memCache.size > MAX_MEM_ENTRIES) {
+    const oldest = memCache.keys().next().value;
+    if (oldest !== undefined) memCache.delete(oldest);
+  }
+}
 
 interface CacheEntry {
   t: string;
@@ -67,11 +82,6 @@ function parseEntry(key: string, raw: unknown): string | null {
   return null;
 }
 
-/** Synchronous cache lookup — checks both memory and returns null if not in memory. */
-export function getCachedSync(hash: string): string | null {
-  return memCache.get(hash) ?? null;
-}
-
 /** Look up a cached translation. Returns null if not cached or expired. */
 export async function getCached(hash: string): Promise<string | null> {
   // Check memory cache first
@@ -81,7 +91,7 @@ export async function getCached(hash: string): Promise<string | null> {
   const result = await STORAGE.get(hash);
   const translation = parseEntry(hash, result[hash]);
   if (translation !== null) {
-    memCache.set(hash, translation);
+    memSet(hash, translation);
   }
   return translation;
 }
@@ -89,12 +99,31 @@ export async function getCached(hash: string): Promise<string | null> {
 /** Store a translation in cache with current timestamp. Triggers eviction if needed. */
 export async function setCached(hash: string, translation: string): Promise<void> {
   // Write to memory immediately (synchronous for virtual-scroll recovery)
-  memCache.set(hash, translation);
+  memSet(hash, translation);
 
   const entry: CacheEntry = { t: translation, ts: Date.now() };
   await STORAGE.set({ [hash]: entry });
 
   // Trigger async eviction check (fire-and-forget, no await needed for correctness)
+  evictIfNeeded();
+}
+
+/**
+ * Store many translations in a single storage write — far fewer chrome.storage
+ * round-trips than calling setCached() once per element for a batch, and a
+ * single eviction check instead of one per entry.
+ */
+export async function setCachedBatch(
+  entries: Array<{ hash: string; translation: string }>
+): Promise<void> {
+  if (entries.length === 0) return;
+  const ts = Date.now();
+  const toStore: Record<string, CacheEntry> = {};
+  for (const { hash, translation } of entries) {
+    memSet(hash, translation);
+    toStore[hash] = { t: translation, ts };
+  }
+  await STORAGE.set(toStore);
   evictIfNeeded();
 }
 
@@ -123,7 +152,7 @@ export async function getCachedBatch(
       const translation = parseEntry(key, value);
       if (translation !== null) {
         map.set(key, translation);
-        memCache.set(key, translation); // promote to memory
+        memSet(key, translation); // promote to memory
       }
     }
   }
@@ -154,11 +183,23 @@ export async function clearCache(): Promise<void> {
 // --- Eviction (internal) ---
 
 let evictionPending = false;
+let lastEvictionCheck = 0;
 
-/** Evict oldest entries if cache exceeds MAX_ENTRIES. Runs at most once at a time. */
+/** Minimum gap between full-storage eviction scans (each scan reads all entries). */
+const EVICTION_MIN_INTERVAL_MS = 60_000;
+
+/**
+ * Evict oldest entries if cache exceeds MAX_ENTRIES. The scan reads all storage,
+ * so it is throttled to run at most once per minute. The first call after a page
+ * load always runs (lastEvictionCheck starts at 0), keeping storage reliably
+ * bounded. Runs at most once concurrently.
+ */
 async function evictIfNeeded(): Promise<void> {
   if (evictionPending) return;
+  const now = Date.now();
+  if (now - lastEvictionCheck < EVICTION_MIN_INTERVAL_MS) return;
   evictionPending = true;
+  lastEvictionCheck = now;
 
   try {
     const all = await STORAGE.get(null);

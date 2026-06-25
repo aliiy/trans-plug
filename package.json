@@ -1,6 +1,6 @@
 {
   "name": "trans-plug",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "沉浸式翻译浏览器插件 - Immersive translation browser extension (Chrome/Edge MV3)",
   "type": "module",
   "scripts": {

@@ -5,7 +5,7 @@
 
 import { injectStyles } from './styles';
 import { getSettings, getSetting } from '../utils/storage';
-import { hashContent, getCached, setCached, getCachedBatch, clearCache } from '../utils/cache';
+import { hashContent, getCachedBatch, setCachedBatch } from '../utils/cache';
 import {
   getTranslatableElements,
   shouldTranslate,
@@ -15,6 +15,7 @@ import {
   TRANS_BLOCK_CLASS,
   TRANS_MARKER_CLASS,
   HASH_ATTR,
+  PENDING_ATTR,
 } from '../utils/domUtils';
 import { translateBatch } from '../utils/translator';
 import { getDomainAction } from '../utils/domainRules';
@@ -31,7 +32,7 @@ import {
 } from './selection-translator';
 
 // --- Constants ---
-const BATCH_SIZE = 25;
+const BATCH_SIZE = 15;  // smaller batches → faster turnover, so a scroll redirects translation sooner
 const DEBOUNCE_MS = 50;
 const ROOT_MARGIN = '800px 0px';
 const MAX_PARALLEL = 3; // max concurrent API calls
@@ -151,6 +152,37 @@ function isElementNearViewport(el: Element): boolean {
   const rect = el.getBoundingClientRect();
   const margin = 800; // matches ROOT_MARGIN
   return rect.bottom >= -margin && rect.top <= window.innerHeight + margin;
+}
+
+/**
+ * Translation priority for an element — lower = more urgent. Three bands so the
+ * batch always favors what the user is currently looking at:
+ *   1. Visible (intersecting viewport) — most urgent, ordered top-to-bottom.
+ *   2. Below the viewport — about to enter when scrolling down; nearest-below first.
+ *   3. Above the viewport — already scrolled past; least urgent, nearest-above first.
+ * Re-evaluated on every flush, so scrolling immediately redirects translation.
+ */
+function viewportPriority(el: Element): number {
+  const rect = el.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight;
+  const intersecting = rect.top < vh && rect.bottom > 0;
+  if (intersecting) return -1_000_000 + rect.top; // visible
+  if (rect.top >= vh) return rect.top - vh;        // below
+  return 1_000_000 + (-rect.bottom);               // above
+}
+
+/**
+ * Pick the `size` highest-priority (nearest-viewport) elements from candidates.
+ * Layout is only measured when there are more candidates than fit in one batch
+ * (i.e. under contention) — otherwise the whole set goes through untouched.
+ */
+function selectPriorityBatch(candidates: Element[], size: number): Element[] {
+  if (candidates.length <= size) return candidates;
+  const scored = candidates.map((el) => ({ el, p: viewportPriority(el) }));
+  scored.sort((a, b) => a.p - b.p);
+  const batch: Element[] = [];
+  for (let i = 0; i < size; i++) batch.push(scored[i].el);
+  return batch;
 }
 
 // --- Scroll fallback (safety net for IntersectionObserver misses) ---
@@ -299,27 +331,31 @@ function flushQueue(): void {
   if (activeJobs >= MAX_PARALLEL || queue.size === 0) return;
   if (!apiKey) return;
 
-  // Take a batch from the queue
-  const batch: Element[] = [];
+  // Collect all still-valid candidates, dropping dead/invalid ones from the queue.
+  const candidates: Element[] = [];
   for (const el of queue) {
-    if (batch.length >= BATCH_SIZE) break;
-    // Double-check element is still valid
     if (!el.isConnected || !shouldTranslate(el)) {
       queue.delete(el);
       continue;
     }
-    batch.push(el);
+    candidates.push(el);
   }
 
-  // Remove batch items from queue
+  if (candidates.length === 0) return;
+
+  // Prioritize what the user is actually looking at: pick the BATCH_SIZE elements
+  // nearest the viewport (visible first, then about-to-enter below). Re-evaluated
+  // every flush, so after scrolling the next batch targets the new position
+  // instead of grinding through the backlog above it.
+  const batch = selectPriorityBatch(candidates, BATCH_SIZE);
+
+  // Remove batch items from queue and mark them in-flight, so concurrent
+  // detection paths (scroll fallback / IntersectionObserver / MutationObserver)
+  // don't re-queue and re-translate the same element while its API call is
+  // pending — that was the cause of duplicate translation blocks while scrolling.
   for (const el of batch) {
     queue.delete(el);
-  }
-
-  if (batch.length === 0) {
-    // If queue still has items, schedule another flush
-    if (queue.size > 0) scheduleFlush();
-    return;
+    el.setAttribute(PENDING_ATTR, '1');
   }
 
   // Fire and forget — don't await, let batches run in parallel
@@ -327,6 +363,9 @@ function flushQueue(): void {
   translateAndRender(batch)
     .catch(err => console.error('[沉浸式翻译] 批量翻译失败:', err))
     .finally(() => {
+      // Clear any leftover in-flight markers. Rendered elements already cleared
+      // theirs (HASH_ATTR guards them now); this lets any that errored out retry.
+      for (const el of batch) el.removeAttribute(PENDING_ATTR);
       activeJobs--;
       // If more items accumulated, keep the pipeline going
       if (queue.size > 0) {
@@ -377,14 +416,18 @@ async function translateAndRender(elements: Element[]): Promise<void> {
     const texts = liveMisses.map((m) => m.text);
     const translations = await translateBatch(texts, apiKey);
 
+    // Render immediately, then persist every entry in a single storage write.
+    // Caching must not block the render path, so the batch write is fire-and-forget.
+    const toCache: Array<{ hash: string; translation: string }> = [];
     for (let i = 0; i < liveMisses.length; i++) {
       const { el, text, hash } = liveMisses[i];
       // Double-check still connected after API call
       if (!el.isConnected) continue;
       const translation = translations[i] ?? text;
-      await setCached(hash, translation);
       renderTranslation(el, text, translation, hash);
+      toCache.push({ hash, translation });
     }
+    void setCachedBatch(toCache);
   }
 }
 
@@ -396,6 +439,9 @@ function renderTranslation(
 ): void {
   // Skip if element was removed from DOM while we were waiting for API
   if (!el.isConnected) return;
+
+  // Translation has arrived — clear the in-flight marker (HASH_ATTR takes over).
+  el.removeAttribute(PENDING_ATTR);
 
   // Skip if translation is same as original (already Chinese, numbers, etc.)
   if (translatedText === originalText) {
@@ -410,17 +456,45 @@ function renderTranslation(
   // Guard MutationObserver from firing on our own insertion
   isInserting = true;
 
-  // Insert translation as a sibling <span> after the original element.
-  // Sibling insertion preserves the original element's internal DOM (React/Vue
-  // reconciliation unaffected) and avoids disrupting CSS :nth-child / :last-child
-  // selectors on the original element's children. <span> is safe as a sibling
-  // after any element including <p> (parser auto-close only triggers on block
-  // elements, not inline <span>).
+  // Insert the translation block. Default is sibling insertion after the
+  // original (preserves the original's internal DOM for React/Vue and avoids
+  // breaking :nth-child selectors); flex/grid parents are handled specially to
+  // avoid layout breakage. See insertTranslationBlock() for the full rationale.
   const block = createTranslationBlock(translatedText);
-  el.insertAdjacentElement('afterend', block);
+  insertTranslationBlock(el, block);
 
   // Release the guard after the browser has processed the insertion
   requestAnimationFrame(() => { isInserting = false; });
+}
+
+/**
+ * Insert the translation block without disrupting the host layout.
+ *
+ * Default: sibling insertion after the original element (`afterend`) — keeps the
+ * original element's internal DOM intact so SPA frameworks (React/Vue) don't
+ * reconcile the translation away, and avoids breaking :nth-child selectors.
+ *
+ * Exception: when the original element's PARENT is a flex or grid container, a
+ * sibling would become a brand-new flex/grid item and land in its own column or
+ * cell — a very common cause of broken layouts. In that case we nest the
+ * translation INSIDE the original element instead, so the existing item simply
+ * grows taller. (Trade-off: a framework re-render may drop the nested node, but
+ * it is then re-translated straight from cache.)
+ */
+function insertTranslationBlock(el: Element, block: HTMLElement): void {
+  const parent = el.parentElement;
+  const parentDisplay = parent ? getComputedStyle(parent).display : '';
+  const parentIsFlexOrGrid =
+    parentDisplay.includes('flex') || parentDisplay.includes('grid');
+
+  if (parentIsFlexOrGrid) {
+    // Force the nested translation onto its own full-width line (also covers the
+    // rarer case where the element itself is a flex/grid container).
+    block.style.width = '100%';
+    el.appendChild(block);
+  } else {
+    el.insertAdjacentElement('afterend', block);
+  }
 }
 
 // --- Message handling ---
